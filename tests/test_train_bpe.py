@@ -47,17 +47,6 @@ def test_train_bpe():
             )
             for merge_token_1, merge_token_2 in gpt2_reference_merges
         ]
-    
-    # After computing vocab and merges, before the assert
-    for i, (got, expected) in enumerate(zip(merges, reference_merges)):
-        if got != expected:
-            print(f"First divergence at merge #{i}")
-            print(f"  Got:      {got}")
-            print(f"  Expected: {expected}")
-            break
-    else:
-        print(f"First {min(len(merges), len(reference_merges))} merges match")
-        print(f"len(merges)={len(merges)}, len(reference_merges)={len(reference_merges)}")
     assert merges == reference_merges
 
     # Compare the vocab to the expected output vocab
