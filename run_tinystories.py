@@ -7,7 +7,8 @@ from cs336_basics.train_bpe import train_bpe
 VOCAB_SIZE = 10_000
 SPECIAL_TOKENS = ["<|endoftext|>"]
 INPUT_PATH = "data/TinyStoriesV2-GPT4-train.txt"
-OUTPUT_DIR = "data"
+OUTPUT_DIR = "outputs/bpe"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 if __name__ == "__main__":
     print(f"Input: {INPUT_PATH} ({os.path.getsize(INPUT_PATH) / 1024 / 1024:.1f} MB)")

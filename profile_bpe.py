@@ -7,6 +7,9 @@ import tracemalloc
 from tests.adapters import run_train_bpe
 from tests.sample_file import sample_file
 
+OUTPUT_DIR = "outputs/bpe"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
 if __name__ == '__main__':
     tracemalloc.start()
     profiler = cProfile.Profile()
@@ -30,7 +33,7 @@ if __name__ == '__main__':
     )
 
     file_name = os.path.basename(input_path).split(".")[0]
-    with open(f"tests/bpe_results/bpe_vocab_{file_name}_{len(vocab)}.json", "w") as f:
+    with open(f"{OUTPUT_DIR}/bpe_vocab_{file_name}_{len(vocab)}.json", "w") as f:
         json.dump({str(k): v.decode('latin-1') for k, v in vocab.items()}, f, indent=2)
     print(f"Token with longest byte length: {max(vocab.values(), key=len)}")
 
