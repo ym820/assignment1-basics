@@ -1,7 +1,7 @@
 # CS336 Spring 2025 Assignment 1: Basics
 
 For a full description of the assignment, see the assignment handout at
-[cs336_assignment1_basics.pdf](./cs336_assignment1_basics.pdf)
+[cs336_assignment1_basics.pdf](cs336_assignment1_basics.pdf)
 
 If you see any issues with the assignment handout or code, please feel free to
 raise a GitHub issue or open a pull request with a fix.
@@ -28,7 +28,7 @@ uv run pytest
 
 Initially, all tests should fail with `NotImplementedError`s.
 To connect your implementation to the tests, complete the
-functions in [./tests/adapters.py](./tests/adapters.py).
+functions in [adapters.py](tests/adapters.py).
 
 ### Download data
 Download the TinyStories data and a subsample of OpenWebText
