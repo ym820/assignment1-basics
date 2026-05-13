@@ -161,3 +161,17 @@ cython_debug/
 
 .ruff_cache/
 *.zip
+data/
+
+# macOS
+.DS_Store
+
+# CS336 outputs / artifacts
+outputs/
+*.pt
+*.npy
+*.bin
+wandb/
+runs/
+logs/
+*.prof
