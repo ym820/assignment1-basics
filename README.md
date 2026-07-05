@@ -28,7 +28,7 @@ uv run pytest
 
 Initially, all tests should fail with `NotImplementedError`s.
 To connect your implementation to the tests, complete the
-functions in [adapters.py](tests/adapters.py).
+functions in [adapters.py](assignments/assignment1-basics/tests/adapters.py).
 
 ### Download data
 Download the TinyStories data and a subsample of OpenWebText

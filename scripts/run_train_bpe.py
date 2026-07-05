@@ -6,7 +6,7 @@ import pstats
 import time
 import tracemalloc
 
-from cs336_basics.train_bpe import train_bpe
+from cs336_basics.train_bpe_parallel import train_bpe
 
 DATASETS = {
     "tinystories": {
