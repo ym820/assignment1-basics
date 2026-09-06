@@ -1,3 +1,9 @@
+"""
+Three terms are used frequently in this script:
+token  : bytes                    # b'l', or b'ow' after a merge
+word   : tuple[bytes, ...]        # a sequence of tokens, e.g. (b'l', b'o', b'w') and (b'l', b'ow')
+pair   : tuple[bytes, bytes]      # two adjacent tokens in a word
+"""
 # Imports
 import os
 import heapq
@@ -6,21 +12,7 @@ from collections import defaultdict
 from multiprocessing import get_context
 from cs336_basics.pretokenization_example import find_chunk_boundaries
 
-# GPT-2 pre-tokenization regex. Splits text into "words" BEFORE BPE runs.
-# This is critical: BPE merges can never cross pre-token boundaries, so the
-# regex is what prevents things like `(b'the', b' cat')` from ever becoming
-# a single merged token.
-#
-# Alternatives (tried in order, first match wins):
-#   'sdmtv…       : English contractions ('s 'd 'm 't 'll 've 're)
-#   ?\p{L}+       : optional leading space + unicode letters     (" Hello")
-#   ?\p{N}+       : optional leading space + unicode digits      (" 42")
-#   ?[^\s\p{L}\p{N}]+ : optional leading space + punctuation run (" ,")
-#   \s+(?!\S)     : trailing whitespace (end of string / before newline)
-#   \s+           : any other whitespace run
-#
-# Example: "Hello, world!" → ["Hello", ",", " world", "!"]
-PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+GPT2_PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 
 class _ReverseKey:
@@ -54,12 +46,12 @@ def _count_pretokens(text: str, st_pattern: str) -> dict[bytes, int]:
 
     Two-stage split:
       1. First, split OUT any special tokens (e.g. "<|endoftext|>") using
-         st_pattern. Specials must never be fed into PAT because PAT might
+         st_pattern. Specials must never be fed into GPT2_PATTERN because GPT2_PATTERN might
          break them up into punctuation + letters + punctuation.
          NOTE: re.split DROPS the matched delimiter, so specials are
          discarded here entirely — they are re-added to the vocab separately
          in train_bpe and don't participate in merges at all.
-      2. Then, on each non-special segment, run the PAT regex to extract
+      2. Then, on each non-special segment, run the GPT2_PATTERN regex to extract
          pre-tokens.
 
     Returns keys as raw `bytes` (not tuples of single-byte bytes). Why?
@@ -69,7 +61,7 @@ def _count_pretokens(text: str, st_pattern: str) -> dict[bytes, int]:
 
     Example:
       text = "hi hi!"
-      PAT matches: ["hi", " hi", "!"]
+      GPT2_PATTERN matches: ["hi", " hi", "!"]
       returns: {b"hi": 1, b" hi": 1, b"!": 1}
     """
     counts: dict[bytes, int] = {}
@@ -78,7 +70,7 @@ def _count_pretokens(text: str, st_pattern: str) -> dict[bytes, int]:
     # compiling an empty pattern.
     parts = re.split(st_pattern, text) if st_pattern else [text]
     for part in parts:
-        for match in re.finditer(PAT, part):
+        for match in re.finditer(GPT2_PATTERN, part):
             word_bytes = match.group().encode("utf-8")
             counts[word_bytes] = counts.get(word_bytes, 0) + 1
     return counts
@@ -233,9 +225,9 @@ def _merge_in_word(
     token2: bytes,
     new_token: bytes,
     word_id_to_word: dict[int, tuple[bytes, ...]],
-    word_counts: dict[int, int],
+    word_id_to_count: dict[int, int],
     pair_counts: dict[tuple[bytes, bytes], int],
-    pair_from: dict[tuple[bytes, bytes], set],
+    pair_to_word_ids: dict[tuple[bytes, bytes], set],
     heap: list,
 ) -> None:
     """Apply merge (token1, token2) → new_token to a single word.
@@ -247,13 +239,13 @@ def _merge_in_word(
       4a. For every pair whose COUNT changed (the neighbors of each merge
           site), shift pair_counts and push new heap entries.
       4b. For every pair whose MEMBERSHIP in this word changed, update
-          pair_from using set difference.
+          pair_to_word_ids using set difference.
 
     Steps 4a and 4b are separate because counts and membership behave
     differently — see the comments on each for why.
     """
     old_word = word_id_to_word[wid]
-    count = word_counts[wid]
+    count = word_id_to_count[wid]
 
     # --- Step 1: find all merge positions ---
     #
@@ -305,7 +297,7 @@ def _merge_in_word(
     # --- Step 3: update word_id_to_word in place ---
     #
     # The word's ID doesn't change. This is the whole point of using stable
-    # integer IDs: any pair_from entries that still reference this word
+    # integer IDs: any pair_to_word_ids entries that still reference this word
     # (because their pair was unchanged by this merge) keep working without
     # modification — they still point at the same ID, which now resolves to
     # new_word.
@@ -356,21 +348,21 @@ def _merge_in_word(
                 _shift_pair((token2, right_tok), (new_token, right_tok),
                             count, pair_counts, heap)
 
-    # --- Step 4b: update pair_from membership via set difference ---
+    # --- Step 4b: update pair_to_word_ids membership via set difference ---
     #
-    # pair_from[P] answers "which word IDs contain pair P?" — it tracks
+    # pair_to_word_ids[P] answers "which word IDs contain pair P?" — it tracks
     # MEMBERSHIP, not COUNT. A word either contains a pair or it doesn't.
     #
-    # Why not update pair_from inside the Step 4a loop? Because of this bug:
+    # Why not update pair_to_word_ids inside the Step 4a loop? Because of this bug:
     #
     #   old_word = (a, b, c, a, b), merging (b, c) at position 1
     #   Neighbor loop would see (a, b) as the left neighbor and want to
-    #   remove wid from pair_from[(a, b)] — but (a, b) STILL EXISTS in
+    #   remove wid from pair_to_word_ids[(a, b)] — but (a, b) STILL EXISTS in
     #   new_word at position 3! Removing wid there would be wrong.
     #
     # Set difference sidesteps the whole issue: we compute the set of pairs
     # that were in old_word, the set that are in new_word, and only modify
-    # pair_from for pairs that genuinely appeared or disappeared.
+    # pair_to_word_ids for pairs that genuinely appeared or disappeared.
     #
     # Example: old_word=(a,b,c,a,b), new_word=(a,bc,a,b)
     #   old_pairs = {(a,b), (b,c), (c,a)}
@@ -381,9 +373,9 @@ def _merge_in_word(
     old_pair_set = set(zip(old_word, old_word[1:]))
     new_pair_set = set(zip(new_word, new_word[1:]))
     for pair in old_pair_set - new_pair_set:
-        pair_from[pair].discard(wid)
+        pair_to_word_ids[pair].discard(wid)
     for pair in new_pair_set - old_pair_set:
-        pair_from[pair].add(wid)
+        pair_to_word_ids[pair].add(wid)
 
 
 def _apply_merge(
@@ -391,34 +383,34 @@ def _apply_merge(
     token2: bytes,
     new_token: bytes,
     word_id_to_word: dict[int, tuple[bytes, ...]],
-    word_counts: dict[int, int],
+    word_id_to_count: dict[int, int],
     pair_counts: dict[tuple[bytes, bytes], int],
-    pair_from: dict[tuple[bytes, bytes], set],
+    pair_to_word_ids: dict[tuple[bytes, bytes], set],
     heap: list,
 ) -> None:
     """Apply one BPE merge across every word that contains the pair.
 
-    pair_from[(token1, token2)] is our index of "which words need updating."
+    pair_to_word_ids[(token1, token2)] is our index of "which words need updating."
     Without it we'd have to scan every word every merge, which would turn
     this into an O(V * W) algorithm. With it, we only touch the words that
     actually contain the pair being merged.
 
-    The list() snapshot is required because _merge_in_word mutates pair_from
-    during iteration — specifically, it may add wid to OTHER pair_from
+    The list() snapshot is required because _merge_in_word mutates pair_to_word_ids
+    during iteration — specifically, it may add wid to OTHER pair_to_word_ids
     entries via set difference, and in pathological cases also discard from
-    pair_from[(token1, token2)] itself if the word happened to contain the
+    pair_to_word_ids[(token1, token2)] itself if the word happened to contain the
     merged pair more than once.
     """
-    for wid in list(pair_from[(token1, token2)]):
+    for wid in list(pair_to_word_ids[(token1, token2)]):
         _merge_in_word(
             wid, token1, token2, new_token,
-            word_id_to_word, word_counts,
-            pair_counts, pair_from, heap,
+            word_id_to_word, word_id_to_count,
+            pair_counts, pair_to_word_ids, heap,
         )
     # After applying to every affected word, the merged pair is guaranteed
     # to no longer exist anywhere in the corpus. Drop it from both indices.
     del pair_counts[(token1, token2)]
-    del pair_from[(token1, token2)]
+    del pair_to_word_ids[(token1, token2)]
 
 
 # ---------- Top-level training entry point ----------
@@ -436,14 +428,14 @@ def train_bpe(
       1. Initialize vocab with 256 single-byte tokens + any special tokens.
       2. Pre-tokenize the corpus into a {word: count} dict. Words are
          tuples of single-byte bytes objects (the BPE "starting state").
-      3. Build indices: pair_counts (pair → total count) and pair_from
+      3. Build indices: pair_counts (pair → total count) and pair_to_word_ids
          (pair → set of word IDs containing it).
       4. Build a max-heap of pair_counts with lazy deletion.
       5. Until vocab reaches target size:
            - Pop the best pair from the heap.
            - Record the merge, add new_token to vocab.
            - Apply the merge to every affected word, incrementally updating
-             pair_counts, pair_from, and the heap.
+             pair_counts, pair_to_word_ids, and the heap.
 
     Args:
         input_path:    Path to the input text file for training.
@@ -462,23 +454,15 @@ def train_bpe(
                 must be applied at higher priority.
     """
     # --- Step 1: Initialize vocabulary ---
-    # First 256 slots: every possible single byte. This guarantees BPE can
-    # encode any byte sequence (no OOV is possible).
     vocab: dict[int, bytes] = {i: bytes([i]) for i in range(256)}
-    # Then append special tokens. These get fresh IDs starting at 256.
-    # e.g. special_tokens=["<|endoftext|>"] → vocab[256] = b"<|endoftext|>"
     for i, token in enumerate(special_tokens):
         vocab[256 + i] = token.encode("utf-8")
     merges: list[tuple[bytes, bytes]] = []
 
-    # Pattern used to split OUT special tokens before pre-tokenization.
-    # re.escape handles any regex metacharacters inside the special strings
-    # (e.g. the | and < > in "<|endoftext|>" would otherwise be interpreted).
-    # Empty string if no specials — _count_pretokens handles that case.
-    st_pattern = "|".join(re.escape(tok) for tok in special_tokens)
 
     # --- Step 2: Pre-tokenization ---
     num_processes = min(8, os.cpu_count() or 1)
+    st_pattern = "|".join(re.escape(tok) for tok in special_tokens)
     print(f"Pre-tokenizing with {num_processes} processes...")
     if num_processes > 1:
         pre_token_counts = _get_pre_token_counts_parallel(
@@ -487,44 +471,47 @@ def train_bpe(
     else:
         pre_token_counts = _get_pre_token_counts_serial(input_path, st_pattern)
 
+
     # --- Step 3: Build BPE indices ---
     #
     # Assign each unique pre-token a stable integer ID. This is a key design
-    # choice: it lets pair_from use cheap int sets (not tuple-of-bytes sets),
+    # choice: it lets pair_to_word_ids use cheap int sets (not tuple-of-bytes sets),
     # and it lets us update a word's token sequence IN PLACE without having
-    # to touch pair_from entries for unchanged pairs — they still point at
+    # to touch pair_to_word_ids entries for unchanged pairs — they still point at
     # the same ID, which now resolves to the updated word.
     #
     # Example: pre_token_counts = {(b'l',b'o',b'w'): 3, (b'h',b'i'): 5}
     #   word_id_to_word = {0: (b'l',b'o',b'w'), 1: (b'h',b'i')}
-    #   word_counts     = {0: 3,                 1: 5}
+    #   word_id_to_count     = {0: 3,                 1: 5}
     word_id_to_word: dict[int, tuple[bytes, ...]] = {}
-    word_counts: dict[int, int] = {}
+    word_id_to_count: dict[int, int] = {}
     for wid, (word, count) in enumerate(pre_token_counts.items()):
         word_id_to_word[wid] = word
-        word_counts[wid] = count
+        word_id_to_count[wid] = count
 
     # pair_counts[P] = total corpus frequency of adjacent pair P,
-    #                  summed over all words (each weighted by word_counts).
-    # pair_from[P]   = set of word IDs whose current token sequence contains P.
+    #                  summed over all words (each weighted by word_id_to_count).
+    # pair_to_word_ids[P]   = set of word IDs whose current token sequence contains P.
     #
     # Example (continuing the above): word_id=0 is (b'l',b'o',b'w') count=3
-    #   pair_counts[(b'l',b'o')] += 3,  pair_from[(b'l',b'o')].add(0)
-    #   pair_counts[(b'o',b'w')] += 3,  pair_from[(b'o',b'w')].add(0)
+    #   pair_counts[(b'l',b'o')] += 3,  pair_to_word_ids[(b'l',b'o')].add(0)
+    #   pair_counts[(b'o',b'w')] += 3,  pair_to_word_ids[(b'o',b'w')].add(0)
     pair_counts: dict[tuple[bytes, bytes], int] = defaultdict(int)
-    pair_from: dict[tuple[bytes, bytes], set] = defaultdict(set)
+    pair_to_word_ids: dict[tuple[bytes, bytes], set] = defaultdict(set)
     for wid, word in word_id_to_word.items():
-        count = word_counts[wid]
+        count = word_id_to_count[wid]
         for i in range(len(word) - 1):
             pair = (word[i], word[i + 1])
             pair_counts[pair] += count
-            pair_from[pair].add(wid)
+            pair_to_word_ids[pair].add(wid)
+
 
     # --- Step 4: Build heap ---
     # heapify is O(n), which is much faster than n individual pushes (O(n log n)).
     # See the "Heap helpers" section above for the lazy-deletion design.
     heap: list = [(-count, _ReverseKey(pair)) for pair, count in pair_counts.items()]
     heapq.heapify(heap)
+
 
     # --- Step 5: Merge loop ---
     # Each iteration: find best pair → record merge → apply merge to corpus.
@@ -536,8 +523,8 @@ def train_bpe(
         vocab[len(vocab)] = new_token
         _apply_merge(
             token1, token2, new_token,
-            word_id_to_word, word_counts,
-            pair_counts, pair_from, heap,
+            word_id_to_word, word_id_to_count,
+            pair_counts, pair_to_word_ids, heap,
         )
 
     return vocab, merges

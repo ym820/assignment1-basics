@@ -6,8 +6,6 @@ import pstats
 import time
 import tracemalloc
 
-from cs336_basics.train_bpe_parallel import train_bpe
-
 DATASETS = {
     "tinystories": {
         "input": "data/TinyStoriesV2-GPT4-train.txt",
@@ -21,6 +19,7 @@ DATASETS = {
     },
 }
 
+VARIANTS = ["train_bpe_parallel", "train_bpe"]
 
 def parse_args():
     p = argparse.ArgumentParser(description="Train BPE on a dataset.")
@@ -30,6 +29,7 @@ def parse_args():
     p.add_argument("--output-dir", default="outputs/bpe")
     p.add_argument("--profile", action="store_true", help="Run under cProfile, save .prof, print top-N.")
     p.add_argument("--top-n", type=int, default=20)
+    p.add_argument("--variant", choices=VARIANTS, default="train_bpe")
     args = p.parse_args()
 
     cfg = DATASETS.get(args.dataset, {})
@@ -57,6 +57,12 @@ def main():
 
     if profiler:
         profiler.enable()
+    
+    if args.variant == "train_bpe":
+        from cs336_basics.train_bpe import train_bpe
+    else:
+        from cs336_basics.train_bpe_parallel import train_bpe
+
     vocab, merges = train_bpe(
         input_path=args.input,
         vocab_size=args.vocab_size,
@@ -74,7 +80,7 @@ def main():
     print(f"Vocab size: {len(vocab)}, Merges: {len(merges)}")
     print(f"Longest token: {max(vocab.values(), key=len)}")
 
-    suffix = f"{args.name}_{args.vocab_size}"
+    suffix = f"{args.name}_{args.vocab_size}_{args.variant}"
     vocab_path = os.path.join(args.output_dir, f"bpe_vocab_{suffix}.json")
     merges_path = os.path.join(args.output_dir, f"bpe_merges_{suffix}.txt")
 
