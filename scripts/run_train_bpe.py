@@ -84,10 +84,10 @@ def main():
     vocab_path = os.path.join(args.output_dir, f"bpe_vocab_{suffix}.pkl")
     merges_path = os.path.join(args.output_dir, f"bpe_merges_{suffix}.pkl")
 
-    with open(vocab_path, "w") as f:
+    with open(vocab_path, "wb") as f:
         # json.dump({str(k): v.decode("latin-1") for k, v in vocab.items()}, f, indent=2)
         pickle.dump(vocab, f)
-    with open(merges_path, "w") as f:
+    with open(merges_path, "wb") as f:
         # for t1, t2 in merges:
             # f.write(t1.decode("latin-1") + " " + t2.decode("latin-1") + "\n")
         pickle.dump(merges, f)
