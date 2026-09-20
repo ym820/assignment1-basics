@@ -1,6 +1,6 @@
 import argparse
 import cProfile
-import json
+import pickle
 import os
 import pstats
 import time
@@ -81,14 +81,16 @@ def main():
     print(f"Longest token: {max(vocab.values(), key=len)}")
 
     suffix = f"{args.name}_{args.vocab_size}_{args.variant}"
-    vocab_path = os.path.join(args.output_dir, f"bpe_vocab_{suffix}.json")
-    merges_path = os.path.join(args.output_dir, f"bpe_merges_{suffix}.txt")
+    vocab_path = os.path.join(args.output_dir, f"bpe_vocab_{suffix}.pkl")
+    merges_path = os.path.join(args.output_dir, f"bpe_merges_{suffix}.pkl")
 
     with open(vocab_path, "w") as f:
-        json.dump({str(k): v.decode("latin-1") for k, v in vocab.items()}, f, indent=2)
+        # json.dump({str(k): v.decode("latin-1") for k, v in vocab.items()}, f, indent=2)
+        pickle.dump(vocab, f)
     with open(merges_path, "w") as f:
-        for t1, t2 in merges:
-            f.write(t1.decode("latin-1") + " " + t2.decode("latin-1") + "\n")
+        # for t1, t2 in merges:
+            # f.write(t1.decode("latin-1") + " " + t2.decode("latin-1") + "\n")
+        pickle.dump(merges, f)
 
     print(f"Saved vocab → {vocab_path}")
     print(f"Saved merges → {merges_path}")
