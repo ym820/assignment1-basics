@@ -4,6 +4,7 @@ token  : bytes                    # b'l', or b'ow' after a merge
 word   : tuple[bytes, ...]        # a sequence of tokens, e.g. (b'l', b'o', b'w') and (b'l', b'ow')
 pair   : tuple[bytes, bytes]      # two adjacent tokens in a word
 """
+
 # Imports
 import os
 import heapq
@@ -32,14 +33,24 @@ class _ReverseKey:
         Without _ReverseKey: (b'a', b'b') pops first (it's "smaller").
         With    _ReverseKey: (b'x', b'y') pops first (tie → pick larger).
     """
-    __slots__ = ('key',)
-    def __init__(self, key): self.key = key
-    def __eq__(self, other): return self.key == other.key
-    def __lt__(self, other): return self.key > other.key   # inverted
-    def __le__(self, other): return self.key >= other.key  # inverted
+
+    __slots__ = ("key",)
+
+    def __init__(self, key):
+        self.key = key
+
+    def __eq__(self, other):
+        return self.key == other.key
+
+    def __lt__(self, other):
+        return self.key > other.key  # inverted
+
+    def __le__(self, other):
+        return self.key >= other.key  # inverted
 
 
 # ---------- Pre-tokenization ----------
+
 
 def _count_pretokens(text: str, st_pattern: str) -> dict[bytes, int]:
     """Run GPT-2 pre-tokenization on `text` and return {pre_token_bytes: count}.
@@ -119,10 +130,7 @@ def _get_pre_token_counts_parallel(
     with open(input_path, "rb") as f:
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
 
-    chunk_args = [
-        (input_path, start, end, st_pattern)
-        for start, end in zip(boundaries[:-1], boundaries[1:])
-    ]
+    chunk_args = [(input_path, start, end, st_pattern) for start, end in zip(boundaries[:-1], boundaries[1:])]
     # get_context("spawn") forces a fresh Python interpreter per worker,
     # which is safer on macOS and avoids inheriting random module state.
     with get_context("spawn").Pool(processes=num_processes) as pool:
@@ -134,21 +142,18 @@ def _get_pre_token_counts_parallel(
             # word_bytes[i:i+1] returns a length-1 `bytes` (hashable, usable
             # as a dict key). word_bytes[i] alone would return an int.
             # Example: b"hi" → (b"h", b"i")
-            key = tuple(word_bytes[i:i + 1] for i in range(len(word_bytes)))
+            key = tuple(word_bytes[i : i + 1] for i in range(len(word_bytes)))
             pre_token_counts[key] += count
     return pre_token_counts
 
 
-def _get_pre_token_counts_serial(
-    input_path: str, st_pattern: str
-) -> dict[tuple[bytes, ...], int]:
+def _get_pre_token_counts_serial(input_path: str, st_pattern: str) -> dict[tuple[bytes, ...], int]:
     """Single-process fallback. Same output shape as the parallel version."""
     with open(input_path, "rb") as f:
         text = f.read().decode("utf-8", errors="ignore")
     byte_counts = _count_pretokens(text, st_pattern)
     return {
-        tuple(word_bytes[i:i + 1] for i in range(len(word_bytes))): count
-        for word_bytes, count in byte_counts.items()
+        tuple(word_bytes[i : i + 1] for i in range(len(word_bytes))): count for word_bytes, count in byte_counts.items()
     }
 
 
@@ -172,9 +177,7 @@ def _push_pair(heap: list, pair: tuple[bytes, bytes], count: int) -> None:
     heapq.heappush(heap, (-count, _ReverseKey(pair)))
 
 
-def _pop_best_pair(
-    heap: list, pair_counts: dict[tuple[bytes, bytes], int]
-) -> tuple[bytes, bytes]:
+def _pop_best_pair(heap: list, pair_counts: dict[tuple[bytes, bytes], int]) -> tuple[bytes, bytes]:
     """Pop the highest-count pair, skipping stale entries.
 
     Example of staleness:
@@ -218,6 +221,7 @@ def _shift_pair(
 
 
 # ---------- Merge application ----------
+
 
 def _merge_in_word(
     wid: int,
@@ -333,20 +337,17 @@ def _merge_in_word(
         # Left neighbor (skip if the previous position is also a merge site)
         if p > 0 and (p - 2) not in pos_set:
             left_tok = old_word[p - 1]
-            _shift_pair((left_tok, token1), (left_tok, new_token),
-                        count, pair_counts, heap)
+            _shift_pair((left_tok, token1), (left_tok, new_token), count, pair_counts, heap)
 
         # Right neighbor
         if p + 2 < len(old_word):
             if (p + 2) in pos_set:
                 # Adjacent merge: the seam (token2, token1) becomes
                 # (new_token, new_token). Both sides are being merged.
-                _shift_pair((token2, token1), (new_token, new_token),
-                            count, pair_counts, heap)
+                _shift_pair((token2, token1), (new_token, new_token), count, pair_counts, heap)
             else:
                 right_tok = old_word[p + 2]
-                _shift_pair((token2, right_tok), (new_token, right_tok),
-                            count, pair_counts, heap)
+                _shift_pair((token2, right_tok), (new_token, right_tok), count, pair_counts, heap)
 
     # --- Step 4b: update pair_to_word_ids membership via set difference ---
     #
@@ -403,9 +404,15 @@ def _apply_merge(
     """
     for wid in list(pair_to_word_ids[(token1, token2)]):
         _merge_in_word(
-            wid, token1, token2, new_token,
-            word_id_to_word, word_id_to_count,
-            pair_counts, pair_to_word_ids, heap,
+            wid,
+            token1,
+            token2,
+            new_token,
+            word_id_to_word,
+            word_id_to_count,
+            pair_counts,
+            pair_to_word_ids,
+            heap,
         )
     # After applying to every affected word, the merged pair is guaranteed
     # to no longer exist anywhere in the corpus. Drop it from both indices.
@@ -414,6 +421,7 @@ def _apply_merge(
 
 
 # ---------- Top-level training entry point ----------
+
 
 def train_bpe(
     input_path: str,
@@ -459,18 +467,14 @@ def train_bpe(
         vocab[256 + i] = token.encode("utf-8")
     merges: list[tuple[bytes, bytes]] = []
 
-
     # --- Step 2: Pre-tokenization ---
     num_processes = min(8, os.cpu_count() or 1)
     st_pattern = "|".join(re.escape(tok) for tok in special_tokens)
     print(f"Pre-tokenizing with {num_processes} processes...")
     if num_processes > 1:
-        pre_token_counts = _get_pre_token_counts_parallel(
-            input_path, num_processes, st_pattern
-        )
+        pre_token_counts = _get_pre_token_counts_parallel(input_path, num_processes, st_pattern)
     else:
         pre_token_counts = _get_pre_token_counts_serial(input_path, st_pattern)
-
 
     # --- Step 3: Build BPE indices ---
     #
@@ -505,13 +509,11 @@ def train_bpe(
             pair_counts[pair] += count
             pair_to_word_ids[pair].add(wid)
 
-
     # --- Step 4: Build heap ---
     # heapify is O(n), which is much faster than n individual pushes (O(n log n)).
     # See the "Heap helpers" section above for the lazy-deletion design.
     heap: list = [(-count, _ReverseKey(pair)) for pair, count in pair_counts.items()]
     heapq.heapify(heap)
-
 
     # --- Step 5: Merge loop ---
     # Each iteration: find best pair → record merge → apply merge to corpus.
@@ -519,12 +521,17 @@ def train_bpe(
     while len(vocab) < vocab_size:
         token1, token2 = _pop_best_pair(heap, pair_counts)
         merges.append((token1, token2))
-        new_token = token1 + token2        # bytes concatenation: b'e'+b's' → b'es'
+        new_token = token1 + token2  # bytes concatenation: b'e'+b's' → b'es'
         vocab[len(vocab)] = new_token
         _apply_merge(
-            token1, token2, new_token,
-            word_id_to_word, word_id_to_count,
-            pair_counts, pair_to_word_ids, heap,
+            token1,
+            token2,
+            new_token,
+            word_id_to_word,
+            word_id_to_count,
+            pair_counts,
+            pair_to_word_ids,
+            heap,
         )
 
     return vocab, merges
