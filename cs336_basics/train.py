@@ -222,6 +222,7 @@ def main():
     # Training loop
     start_time = time.perf_counter()
     eval_time_total = 0.0
+    nan_alerted = False
     for step in range(start_iteration, args.max_steps):
 
         # Set optimizer's lr with scheduler
@@ -276,6 +277,11 @@ def main():
             )
             log(metrics_path, _wandb, metrics)
 
+            # Alert once if training diverged
+            if _wandb is not None and not nan_alerted and not math.isfinite(train_loss):
+                _wandb.alert(title=f"{run_name} diverged", text=f"train loss {train_loss} at step {step}", level=_wandb.AlertLevel.WARN)
+                nan_alerted = True
+
         if step % args.eval_interval == 0 or step == args.max_steps-1:
             eval_start = time.perf_counter()
             # Wall-clock time up to this eval (includes earlier evals and pre-resume time)
@@ -292,6 +298,14 @@ def main():
             metrics = {"step": step, "tokens": tokens_seen, "time_s": elapsed, "val/loss": val_loss, "val/ppl": val_ppl, "val/time_s": eval_time_s, "val/tokens": val_tokens, "val/full": is_final}
             if is_final:
                 print(f"[Final eval]  step {step}/{args.max_steps} | val_loss {val_loss:.4f} | val_ppl {val_ppl:.4f} | eval_time_s {eval_time_s:.1f} s")
+                if _wandb is not None:
+                    # Handout target applies to TinyStories only
+                    target = f" (target <= 1.45: {'yes' if val_loss <= 1.45 else 'no'})" if "tinystories" in args.val_data_path else ""
+                    _wandb.alert(
+                        title=f"{run_name} finished",
+                        text=f"val_loss {val_loss:.4f}{target} | ppl {val_ppl:.2f} | {step + 1} steps, {tokens_seen / 1e6:.1f}M tokens | {elapsed / 60:.1f} min",
+                        level=_wandb.AlertLevel.INFO
+                    )
             else:
                 print(f"[eval]  step {step}/{args.max_steps} | val_loss {val_loss:.4f} | val_ppl {val_ppl:.4f} | eval_time_s {eval_time_s:.1f} s")
             log(metrics_path, _wandb, metrics)
