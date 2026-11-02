@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from cs336_basics.model import TransformerLM
 from cs336_basics.optimizer import AdamW, get_lr_cosine_schedule
-from cs336_basics.data import get_batch
+from cs336_basics.data import get_batch, get_eval_batch
 from cs336_basics.nn_utils import cross_entropy, gradient_clipping
 from cs336_basics.training import load_checkpoint, save_checkpoint
 
@@ -48,7 +48,7 @@ def parse_args():
     parser.add_argument("--max_steps", type=int, default=None)  # derived: total_tokens // (batch_size * context_length)
     parser.add_argument("--log_interval", type=int, default=50)
     parser.add_argument("--eval_interval", type=int, default=500)
-    parser.add_argument("--eval_iters", type=int, default=20)
+    parser.add_argument("--eval_tokens", type=int, default=None)  # cap for periodic evals (evenly spaced windows); None = full pass. Final eval is always full
     parser.add_argument("--checkpoint_interval", type=int, default=1000)
     parser.add_argument("--resume_path", type=str, default=None)
 
@@ -92,23 +92,37 @@ def resolve_args(args):
 
     return args
 
-def evaluate(model: torch.nn.Module, data: np.memmap, device, args):
+def evaluate(model: torch.nn.Module, data: np.memmap, device, args, full: bool = False):
+    """Mean per-token loss over non-overlapping windows: all of them if full or no cap, else an evenly spaced subset of ~eval_tokens."""
     model.eval()
-    losses = []
-    for _ in range(args.eval_iters):
-        val_inputs, val_targets = get_batch(
-            dataset=data,
-            batch_size=args.batch_size,
-            context_length=args.context_length,
-            device=device
-        )
-        with torch.no_grad():
-            logits = model(val_inputs)
-            loss = cross_entropy(logits, val_targets)
-        
-        losses.append(loss.item())
+    total_windows = (data.shape[0] - 1) // args.context_length
+    assert total_windows > 0, f"Dataset too short for context_length ({args.context_length})"
+    if full or args.eval_tokens is None:
+        window_stride = 1
+    else:
+        max_windows = max(1, args.eval_tokens // args.context_length)
+        window_stride = math.ceil(total_windows / max_windows)
+    num_windows = math.ceil(total_windows / window_stride)
+    num_batches = math.ceil(num_windows / args.batch_size)
+
+    total_loss = 0.0
+    total_tokens = 0
+    with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=args.dtype=="bfloat16"):
+        for batch_idx in range(num_batches):
+            inputs, targets = get_eval_batch(
+                dataset=data,
+                batch_idx=batch_idx,
+                batch_size=args.batch_size,
+                context_length=args.context_length,
+                device=device,
+                window_stride=window_stride
+            )
+            loss = cross_entropy(model(inputs), targets)
+            # Weight by token count so the smaller last batch isn't over-counted
+            total_loss += loss.item() * targets.numel()
+            total_tokens += targets.numel()
     model.train()
-    return np.mean(losses)
+    return total_loss / total_tokens, total_tokens
 
 def log(metrics_path, _wandb, metrics):
     with open(metrics_path, "a") as f:
@@ -124,19 +138,23 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    if args.name is not None:
-        run_name = f"{args.prefix}_{args.name}_{time.strftime("%Y%m%d_%H%M%S")}"
+    if args.resume_path:
+        # runs/<run_name>/checkpoints/step_XXXXXX.pt -> runs/<run_name>
+        run_path = os.path.dirname(os.path.dirname(os.path.abspath(args.resume_path)))
+        run_name = os.path.basename(run_path)
     else:
-        run_name = f"{args.prefix}_{time.strftime("%Y%m%d_%H%M%S")}"
-    
-    run_path = os.path.join(args.run_dir, run_name)
+        suffix = f"{args.name}_" if args.name else ""
+        run_name = f"{args.prefix}_{suffix}{time.strftime('%Y%m%d_%H%M%S')}"
+        run_path = os.path.join(args.run_dir, run_name)
+
     ckpt_dir = os.path.join(run_path, "checkpoints/")
     metrics_path = os.path.join(run_path, "metrics.jsonl")
     os.makedirs(ckpt_dir, exist_ok=True)
 
     config_path = os.path.join(run_path, "config.json")
-    with open(config_path, "w") as f:
-        json.dump(vars(args), f, indent=2)
+    if not args.resume_path:
+        with open(config_path, "w") as f:
+            json.dump(vars(args), f, indent=2)
 
     _wandb = None
     if not args.no_wandb:
@@ -145,6 +163,8 @@ def main():
         _wandb.init(
             project=args.wandb_project,
             name=run_name,
+            id=run_name,
+            resume="allow",
             config=vars(args),
             dir=run_path
         )
@@ -154,10 +174,9 @@ def main():
     # int32 holds about 2.1B, so it's used for training files with more vocabs but it costs 4 bytes per token
     train_mm = np.memmap(args.train_data_path, dtype=np.uint16, mode="r")
     val_mm = np.memmap(args.val_data_path, dtype=np.uint16, mode="r")
-    
-    # Create model
     device = torch.device(args.device)
 
+    # Create model
     model = TransformerLM(
         vocab_size=args.vocab_size,
         context_length=args.context_length,
@@ -184,10 +203,25 @@ def main():
     start_iteration = 0
     if args.resume_path:
         start_iteration = load_checkpoint(args.resume_path, model, optimizer) + 1
+        np.random.seed(args.seed + start_iteration)
+        torch.manual_seed(args.seed + start_iteration)
         print(f"[resume] loaded checkpoint from {args.resume_path}, starting iteration at {start_iteration}")
-    
+
+    # Continue wall-clock time from the last entry logged at or before the checkpoint
+    time_offset = 0.0
+    if args.resume_path and os.path.exists(metrics_path):
+        with open(metrics_path) as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:  # line cut off by preemption
+                    continue
+                if entry["step"] < start_iteration:
+                    time_offset = max(time_offset, entry["time_s"])
+
     # Training loop
     start_time = time.perf_counter()
+    eval_time_total = 0.0
     for step in range(start_iteration, args.max_steps):
 
         # Set optimizer's lr with scheduler
@@ -228,11 +262,13 @@ def main():
         if step % args.log_interval == 0:
             train_loss = loss.item()
             train_grad_norm = grad_norm.item()
-            elapsed = time.perf_counter() - start_time
+            session_time = time.perf_counter() - start_time
+            elapsed = time_offset + session_time
+            train_time = session_time - eval_time_total
             tokens_per_it = args.batch_size * args.context_length
             tokens_seen = (step + 1) * tokens_per_it
-            tok_per_sec = (step + 1 - start_iteration) * tokens_per_it / elapsed
-            metrics = {"step": step, "tokens": tokens_seen, "time_s": elapsed, "train/loss": train_loss, "train/lr": lr, "train/grad_norm": train_grad_norm, "train/tok_per_sec": tok_per_sec}
+            tok_per_sec = (step + 1 - start_iteration) * tokens_per_it / train_time
+            metrics = {"step": step, "tokens": tokens_seen, "time_s": elapsed, "train/loss": train_loss, "train/lr": lr, "train/grad_norm": train_grad_norm, "train/tok_per_sec": tok_per_sec, "train/time_s": train_time}
             print(
                 f"[train] step {step}/{args.max_steps} | loss {train_loss:.4f} | lr {lr:.2e} | "
                 f"grad_norm {train_grad_norm:.3f} | tokens {tokens_seen / 1e6:.1f}M | "
@@ -242,17 +278,22 @@ def main():
 
         if step % args.eval_interval == 0 or step == args.max_steps-1:
             eval_start = time.perf_counter()
-            # Wall-clock time (without evaluate)
-            elapsed = eval_start - start_time
+            # Wall-clock time up to this eval (includes earlier evals and pre-resume time)
+            elapsed = time_offset + (eval_start - start_time)
 
             # Evaluate and its duration
-            val_loss = evaluate(model, val_mm, device, args)
+            is_final = step == args.max_steps - 1
+            val_loss, val_tokens = evaluate(model, val_mm, device, args, full=is_final)
             val_ppl = math.exp(val_loss)
             eval_time_s = time.perf_counter() - eval_start
+            eval_time_total += eval_time_s
 
             tokens_seen = (step + 1) * args.batch_size * args.context_length
-            metrics = {"step": step, "tokens": tokens_seen, "time_s": elapsed, "val/loss": val_loss, "val/ppl": val_ppl, "val/time_s": eval_time_s}
-            print(f"[eval]  step {step}/{args.max_steps} | val_loss {val_loss:.4f} | val_ppl {val_ppl:.4f} | eval_time_s {eval_time_s:.1f} s")
+            metrics = {"step": step, "tokens": tokens_seen, "time_s": elapsed, "val/loss": val_loss, "val/ppl": val_ppl, "val/time_s": eval_time_s, "val/tokens": val_tokens, "val/full": is_final}
+            if is_final:
+                print(f"[Final eval]  step {step}/{args.max_steps} | val_loss {val_loss:.4f} | val_ppl {val_ppl:.4f} | eval_time_s {eval_time_s:.1f} s")
+            else:
+                print(f"[eval]  step {step}/{args.max_steps} | val_loss {val_loss:.4f} | val_ppl {val_ppl:.4f} | eval_time_s {eval_time_s:.1f} s")
             log(metrics_path, _wandb, metrics)
 
         if step > 0 and step % args.checkpoint_interval == 0:
