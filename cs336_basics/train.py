@@ -49,6 +49,7 @@ def parse_args():
     parser.add_argument("--log_interval", type=int, default=50)
     parser.add_argument("--eval_interval", type=int, default=500)
     parser.add_argument("--eval_tokens", type=int, default=None)  # cap for periodic evals (evenly spaced windows); None = full pass. Final eval is always full
+    parser.add_argument("--eval_batch_size", type=int, default=128)  # independent of batch_size, so small-batch runs still eval fast
     parser.add_argument("--checkpoint_interval", type=int, default=1000)
     parser.add_argument("--resume_path", type=str, default=None)
 
@@ -103,7 +104,7 @@ def evaluate(model: torch.nn.Module, data: np.memmap, device, args, full: bool =
         max_windows = max(1, args.eval_tokens // args.context_length)
         window_stride = math.ceil(total_windows / max_windows)
     num_windows = math.ceil(total_windows / window_stride)
-    num_batches = math.ceil(num_windows / args.batch_size)
+    num_batches = math.ceil(num_windows / args.eval_batch_size)
 
     total_loss = 0.0
     total_tokens = 0
@@ -112,7 +113,7 @@ def evaluate(model: torch.nn.Module, data: np.memmap, device, args, full: bool =
             inputs, targets = get_eval_batch(
                 dataset=data,
                 batch_idx=batch_idx,
-                batch_size=args.batch_size,
+                batch_size=args.eval_batch_size,
                 context_length=args.context_length,
                 device=device,
                 window_stride=window_stride
