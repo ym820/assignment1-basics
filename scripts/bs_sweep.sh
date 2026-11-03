@@ -4,10 +4,11 @@
 # Token budget: full 327.68M where it fits in ~30 min, else tok/s from bs_calib.sh * 1500 s.
 # Same resume/skip behavior as lr_sweep.sh.
 
-BS=(1 8 32 64 256 384)  # drop 384 / add 512 to match the calib memory max
+BS=(1 8 32 64 256 384)  # 384 is the memory max (512 OOMs on A100 40GB)
+# Calib tok/s: 1: 6.5K, 8: 52K, 32: 142K, 64: 165K, 256: 194K, 384: 199K
 declare -A TOKENS=(
-    [1]=FILL [8]=FILL [32]=FILL
-    [64]=327680000 [256]=327680000 [384]=327680000 [512]=327680000
+    [1]=9700000 [8]=78700000
+    [32]=327680000 [64]=327680000 [256]=327680000 [384]=327680000
 )
 
 for bs in "${BS[@]}"; do
