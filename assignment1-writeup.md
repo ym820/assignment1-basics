@@ -427,3 +427,62 @@ On a single H100, assuming 50% MFU
 $$
 T = \tfrac{T_{\text{total}}}{0.5 * 495 * 10^{12}} \approx 17460229.68 \text{ seconds} \approx 202 \text{ days}
 $$
+
+## Problem (learning_rate): Tune the learning rate (2 B200 hrs)
+
+The learning rate is one of the most important hyperparameters to tune. Taking the base model you’ve trained, answer the following questions:
+**(a)** Perform a hyperparameter sweep over the learning rates and report the final losses (or note divergence if the optimizer diverges).
+
+**Answer:**
+![Learning Rate Sweep](images/learning_rate_sweep.png)
+
+**Search strategy.** All settings except the peak LR were held fixed:
+- d_model 512, 4 layers, 16 heads, d_ff 1344, context length 256
+- batch size 128, 10K steps (327.68M tokens)
+- warmup 300 steps, cosine decay to 0.1 × max_lr, gradient clipping 1.0
+
+I swept peak LR over a log-spaced grid (1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2), since a good LR can be anywhere across several orders of magnitude. I then added 1e-1 to find a divergent run. Periodic evals use a 1M-token validation subset, and final numbers are a full pass over the validation set. Each LR has a single seed.
+
+**Results.**
+
+| LR | Final val loss |
+| --- | --- |
+| 1e-4 | 1.80 |
+| 3e-4 | 1.52 |
+| 1e-3 | 1.39 |
+| 3e-3 | 1.33 |
+| 1e-2 | 1.36 |
+| 3e-2 | 1.61, unstable |
+| 1e-1 | diverged |
+
+`3e-3` is the best, but `1e-3` through `1e-2` finish within about 0.03 of each other. That's within what seed noise could plausibly produce, so I use `3e-3` for the remaining experiments.
+
+**Edge of stability.**
+- 3e-2 is unstable: val loss rose around step 1k and only caught up once cosine decay lowered the LR.
+- 1e-1 diverged: loss stayed around 5.3 and never improved.
+- So instability begins between 1e-2 and 3e-2, which is 3-10× above the best LR. 
+
+**Convergence rate.** 
+`3e-3` converges the fastest 
+
+## Problem (batch_size_experiment): Batch size variations (1 B200 hr)
+
+Vary your batch size all the way from 1 to the GPU memory limit. Try at least a few batch sizes in between, including typical sizes like 64 and 128.
+
+**Answer:**
+![Batch size experiment training loss](images/bs_exp-train_loss.png)
+![Batch size experiment val loss](images/bs_exp-val_loss.png)
+
+**Setup.** Same model on an A100 40GB, with batch sizes from 1 to 384 (512 runs out of memory). Total tokens are fixed at 327.68M, except B=1 and B=8, which are capped at ~30 min. LR = 3e-3 × √(B/128).
+
+**Loss per token.** Small batches lead early because they take more updates per token. B=64 through 384 end within single-seed noise of each other (1.333 to 1.358), and B=32 ends slightly worse at 1.388.
+
+**LR check.** B=64 at 3e-3 matched B=64 at 2.1e-3, so the B=64 vs. B=128 difference isn't explained by LR.
+
+**Loss per second.** Throughput rises from 6.5K tok/s at B=1 to 199K at B=384 and levels off around 256, so large batches win on wall-clock time.
+
+![Batch size experiment grad norm](images/bs_exp-grad_norm.png)
+
+**Gradient norm.** The gradient norm shrinks as batch size grows, roughly as 1/√B, so larger batches give more stable gradients. Training loss is smoother for the same reason: each logged value averages over more tokens.
+
+**Takeaway.** Use the smallest batch that saturates the GPU, here about 128-256.

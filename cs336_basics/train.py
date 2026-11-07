@@ -60,6 +60,9 @@ def parse_args():
     parser.add_argument("--no_wandb", action="store_true")
     parser.add_argument("--wandb_project", type=str, default="cs336-a1")
 
+    # Ablation
+    parser.add_argument("--ablation", default=None, choices=["no_norm", "post_norm", "nope", "silu"])
+
     args = parser.parse_args()
     return args
 
@@ -87,7 +90,11 @@ def resolve_args(args):
     if args.min_lr is None:
         # Set min_lr to 10% of max_lr
         args.min_lr = 0.1 * args.max_lr
-    
+
+    if args.ablation == "silu":
+        args.d_ff = 4 * args.d_model
+        print("[ablation] For silu, set d_ff to 4 x d_model")
+
     if args.d_ff is None:
         args.d_ff = 64 * math.floor((args.d_model * 8 / 3) / 64)
 
@@ -187,7 +194,8 @@ def main():
         d_ff=args.d_ff,
         rope_theta=args.rope_theta,
         device=device,
-        dtype=torch.float32
+        dtype=torch.float32,
+        ablation=args.ablation
     )
     print(f"Model size: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
 

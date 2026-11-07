@@ -3,7 +3,7 @@
 # Safe to re-run after a spot preemption: finished runs are skipped, partial runs resume from their latest checkpoint.
 # To skip a run you killed on purpose (e.g. diverged), create a marker: touch runs/lr_<lr>_<timestamp>/skip
 
-LRS=(1e-4 3e-4 1e-3 3e-3 1e-2 3e-2)
+LRS=(1e-4 3e-4 1e-3 3e-3 1e-2 3e-2 1e-1)
 
 for lr in "${LRS[@]}"; do
     run=$(ls -d runs/lr_${lr}_* 2>/dev/null | tail -n 1)

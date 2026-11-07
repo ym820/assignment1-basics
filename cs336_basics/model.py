@@ -87,7 +87,22 @@ class RMSNorm(nn.Module):
 
 def silu(x: Float[Tensor, ...]) -> Float[Tensor, ...]:
     return x * torch.sigmoid(x)
-    
+
+class SiLU(nn.Module):
+    def __init__(self, d_model: int, d_ff: int, device=None, dtype=None):
+        super().__init__()
+
+        self.d_model = d_model
+        self.d_ff = d_ff
+
+        # W_1: (d_ff, d_model)
+        # W_2: (d_model, d_ff)
+        self.w1 = Linear(self.d_model, self.d_ff, device=device, dtype=dtype)
+        self.w2 = Linear(self.d_ff, self.d_model, device=device, dtype=dtype)
+
+    def forward(self, x: Float[Tensor, "... d_model"]) -> Float[Tensor, "... d_model"]:
+        return self.w2(silu(self.w1(x)))
+
 class SwiGLU(nn.Module):
     def __init__(self, d_model: int, d_ff: int | None = None, device=None, dtype=None):
         super().__init__()
@@ -186,9 +201,12 @@ class MultiHeadSelfAttention(nn.Module):
         num_heads:int, 
         device: torch.device | None = None, 
         dtype: torch.dtype | None = None, 
-        rope: RotaryPositionalEmbedding | None = None
+        rope: RotaryPositionalEmbedding | None = None,
+        ablation: str | None = None
     ):
         super().__init__()
+
+        self.ablation=ablation
 
         self.d_model = d_model
         self.num_heads = num_heads
@@ -213,7 +231,7 @@ class MultiHeadSelfAttention(nn.Module):
         T = x.size(-2)
 
         # Apply RoPE (Q and K only)
-        if self.rope is not None:
+        if self.ablation != "nope" and self.rope is not None:
             if token_positions is None:
                 token_positions = torch.arange(T, dtype=torch.int, device=x.device)
             token_positions = rearrange(token_positions, "... T -> ... 1 T")
@@ -237,23 +255,41 @@ class TransformerBlock(nn.Module):
         d_ff: int, 
         device: torch.device | None = None, 
         dtype: torch.dtype | None = None, 
-        rope: RotaryPositionalEmbedding | None = None
+        rope: RotaryPositionalEmbedding | None = None,
+        ablation: str | None = None
     ) -> None:
         super().__init__()
+
+        self.ablation=ablation
+
         self.d_model = d_model
         self.num_heads = num_heads
         self.d_ff = d_ff
 
         self.ln1 = RMSNorm(d_model, device=device, dtype=dtype)
-        self.attn = MultiHeadSelfAttention(d_model, num_heads, device=device, dtype=dtype, rope=rope)
+        self.attn = MultiHeadSelfAttention(d_model, num_heads, device=device, dtype=dtype, rope=rope, ablation=self.ablation)
         self.ln2 = RMSNorm(d_model, device=device, dtype=dtype)
-        self.ffn = SwiGLU(d_model, d_ff, device=device, dtype=dtype)
+        if self.ablation == "silu":
+            self.ffn = SiLU(d_model, d_ff, device, dtype)
+        else:
+            self.ffn = SwiGLU(d_model, d_ff, device=device, dtype=dtype)
 
     def forward(
         self, 
         x: Float[Tensor, " batch sequence_length d_model"],
         token_positions: Int[Tensor, "... seq_len"] | None = None
     ) -> Float[Tensor, " batch sequence_length d_model"]:
+        if self.ablation == "post_norm":
+            x = self.ln1(x + self.attn(x, token_positions))
+            x = self.ln2(x + self.ffn(x))
+            return x
+
+        if self.ablation == "no_norm":
+            x = x + self.attn(x, token_positions)
+            x = x + self.ffn(x)
+            return x
+        
+        # Pre-norm
         x = x + self.attn(self.ln1(x), token_positions)
         x = x + self.ffn(self.ln2(x))
         return x
@@ -269,10 +305,15 @@ class TransformerLM(nn.Module):
         d_ff: int,
         rope_theta: float,
         device: torch.device | None = None, 
-        dtype: torch.dtype | None = None
+        dtype: torch.dtype | None = None,
+        ablation: str | None = None
     ) -> None:
         super().__init__()
+        
+        # For 7.3 ablation
+        self.ablation = ablation
 
+        # Model size
         self.vocab_size = vocab_size
         self.context_length = context_length
         self.num_layers = num_layers
@@ -297,7 +338,8 @@ class TransformerLM(nn.Module):
                 d_ff=d_ff,
                 device=device,
                 dtype=dtype,
-                rope=self.rope
+                rope=self.rope,
+                ablation=self.ablation
             )
             for _ in range(num_layers)
         ])
@@ -308,7 +350,6 @@ class TransformerLM(nn.Module):
         # Final linear layer: (batch, seq_len, d_model) -> (batch, seq_len, vocab_size)
         self.lm_head = Linear(in_features=d_model, out_features=vocab_size, device=device, dtype=dtype)
 
-
     def forward(
         self,
         in_indices: Int[Tensor, " batch_size sequence_length"]
@@ -318,7 +359,7 @@ class TransformerLM(nn.Module):
 
         for block in self.layers:
             x = block(x)
-        
+
         x = self.ln_final(x)
         logits = self.lm_head(x)
         return logits
